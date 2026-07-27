@@ -1,0 +1,108 @@
+name: Deploy Backend (Netlify)
+
+# ═══════════════════════════════════════════════════════════════════
+# MIGRATED TỪ VERCEL (xem CHANGELOG_NETLIFY_MIGRATION.md) — giữ nguyên
+# TINH THẦN của workflow gốc:
+#   1. LUÔN chạy syntax check (node --check) trên MỌI push/PR — bắt lỗi
+#      cú pháp trước khi code có cơ hội chạm production.
+#   2. CHỈ deploy production khi push thẳng vào nhánh `main` — tránh
+#      deploy nhầm từ nhánh thử nghiệm.
+#
+# ⚠️ THAY ĐỔI SO VỚI BẢN VERCEL:
+#   - `vercel deploy` → `netlify deploy` (dùng Netlify CLI thay vì Vercel CLI)
+#   - Secrets đổi tên: VERCEL_TOKEN/VERCEL_ORG_ID/VERCEL_PROJECT_ID →
+#     NETLIFY_AUTH_TOKEN/NETLIFY_SITE_ID (xem hướng dẫn lấy giá trị bên
+#     dưới)
+#   - Syntax check giờ quét CẢ netlify/functions/ (không còn quét
+#     api/ — thư mục đó đã deprecated, xem api/README.md)
+#   - Kiểm tra netlify.toml hợp lệ (TOML, không phải JSON như
+#     vercel.json cũ) thay vì kiểm tra vercel.json
+#
+# ⚠️ CẦN CẤU HÌNH TRƯỚC KHI DÙNG:
+#   - Secret NETLIFY_AUTH_TOKEN (Netlify Dashboard → User settings →
+#     Applications → New access token)
+#   - Secret NETLIFY_SITE_ID (Netlify Dashboard → Site settings →
+#     General → Site details → Site ID, HOẶC chạy `netlify sites:list`
+#     cục bộ sau khi `netlify link`)
+# Set tại: GitHub repo → Settings → Secrets and variables → Actions
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  syntax-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ⚠️ KHÔNG chạy `npm install` đầy đủ ở bước này — node --check chỉ
+      # cần parse cú pháp, không cần resolve được package thật (nhanh hơn
+      # đáng kể, và vẫn bắt được lỗi cú pháp phổ biến nhất: thiếu ngoặc,
+      # sai từ khoá, lỗi cấu trúc — loại lỗi hay gặp nhất khi sửa code tay).
+      - name: Syntax check tất cả file .js trong netlify/functions
+        run: |
+          fail=0
+          for f in $(find netlify/functions -name "*.js"); do
+            if ! node --check "$f" 2>/tmp/err.log; then
+              echo "❌ Lỗi cú pháp: $f"
+              cat /tmp/err.log
+              fail=1
+            fi
+          done
+          if [ $fail -ne 0 ]; then
+            echo "Có file lỗi cú pháp — dừng workflow, KHÔNG deploy."
+            exit 1
+          fi
+          echo "✅ Toàn bộ file .js hợp lệ cú pháp"
+
+      - name: Kiểm tra package.json là JSON hợp lệ
+        run: |
+          python3 -c "import json; json.load(open('package.json'))" && echo "✅ package.json hợp lệ"
+
+      - name: Kiểm tra netlify.toml tồn tại và không rỗng
+        # ⚠️ netlify.toml là TOML, không phải JSON — không dùng python3
+        # json.load() được. Kiểm tra tối thiểu (file tồn tại, có nội
+        # dung) ở bước CI; cú pháp TOML sai thật sự sẽ bị chính lệnh
+        # `netlify deploy` ở job deploy-production phát hiện và fail rõ
+        # ràng, không cần công cụ TOML parser riêng chỉ cho việc này.
+        run: |
+          if [ ! -s netlify.toml ]; then
+            echo "❌ netlify.toml không tồn tại hoặc rỗng"
+            exit 1
+          fi
+          echo "✅ netlify.toml tồn tại"
+
+  deploy-production:
+    needs: syntax-check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cài dependencies
+        # ⚠️ KHÁC bản Vercel: Netlify CLI cần package.json dependencies
+        # (@netlify/functions, firebase-admin...) đã cài SẴN trong
+        # node_modules TRƯỚC khi build/deploy — esbuild bundler (khai
+        # báo trong netlify.toml) tự bundle từ node_modules cục bộ,
+        # không tự tải như 1 số bundler khác.
+        run: npm install
+
+      - name: Cài Netlify CLI
+        run: npm install --global netlify-cli@latest
+
+      - name: Deploy lên Netlify (production)
+        run: netlify deploy --prod --build
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
